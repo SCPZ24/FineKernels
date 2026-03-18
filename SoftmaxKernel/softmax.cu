@@ -1,5 +1,7 @@
 #include<cuda_runtime.h>
-#include "public.h"
+#include<functional>
+#include<stdio.h>
+#include"public.h"
 
 __device__ __forceinline__ float warpReduceMax(float val){
     for(int offset = 16; offset > 0; offset /= 2){
@@ -138,14 +140,16 @@ __global__ void softmax_forward_optimize(const float* input, float* output){
 // 由Gemini生成的测试用例
 
 // 计时辅助函数
-float test_performance(void (*func)(), int iterations = 100) {
+template <typename F>
+float test_performance(F&& func, int iterations = 100) {
     cudaEvent_t start, stop;
     CHECK(cudaEventCreate(&start));
     CHECK(cudaEventCreate(&stop));
 
     // Warm-up
     func();
-    
+    CHECK(cudaDeviceSynchronize()); // 确保 warm-up 完成
+
     CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; i++) {
         func();
@@ -155,24 +159,24 @@ float test_performance(void (*func)(), int iterations = 100) {
 
     float milliseconds = 0;
     CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    
+    CHECK(cudaEventDestroy(start));
+    CHECK(cudaEventDestroy(stop));
+    
     return milliseconds / iterations;
 }
 
 int main() {
-    const int N = 1024;
+    const int N = 65536;
     const int C_list[] = {128, 1024};
 
     for (int C : C_list) {
         printf(">>> Testing C = %d, N = %d\n", C, N);
         size_t size = N * C * sizeof(float);
-        float *h_in, *h_out_naive, *h_out_opt;
-        float *d_in, *d_out;
-
-        h_in = (float*)malloc(size);
-        h_out_naive = (float*)malloc(size);
-        h_out_opt = (float*)malloc(size);
+        float *h_in = (float*)malloc(size);
         for(int i=0; i<N*C; i++) h_in[i] = (float)(rand() % 100) / 10.0f;
 
+        float *d_in, *d_out;
         CHECK(cudaMalloc(&d_in, size));
         CHECK(cudaMalloc(&d_out, size));
         CHECK(cudaMemcpy(d_in, h_in, size, cudaMemcpyHostToDevice));
@@ -181,8 +185,9 @@ int main() {
         auto launch_naive = [&]() {
             int threads = 128;
             size_t smem = (threads / WARP_SIZE) * sizeof(float);
+            // 注意：这里需要根据运行时 C 选择编译时的模板实例
             if (C == 128) softmax_forward_naive<128><<<N, threads, smem>>>(d_in, d_out);
-            else softmax_forward_naive<1024><<<N, threads, smem>>>(d_in, d_out);
+            else if (C == 1024) softmax_forward_naive<1024><<<N, threads, smem>>>(d_in, d_out);
         };
         float ms_naive = test_performance(launch_naive);
         printf("  Naive Kernel:    %.4f ms\n", ms_naive);
@@ -193,17 +198,15 @@ int main() {
             int threads = rows_per_block * WARP_SIZE; // 128
             int grid = N / rows_per_block;
             if (C == 128) softmax_forward_optimize<128, rows_per_block><<<grid, threads>>>(d_in, d_out);
-            else softmax_forward_optimize<1024, rows_per_block><<<grid, threads>>>(d_in, d_out);
+            else if (C == 1024) softmax_forward_optimize<1024, rows_per_block><<<grid, threads>>>(d_in, d_out);
         };
         float ms_opt = test_performance(launch_opt);
         printf("  Optimize Kernel: %.4f ms (Speedup: %.2fx)\n", ms_opt, ms_naive / ms_opt);
 
-        // 清理
         CHECK(cudaFree(d_in));
         CHECK(cudaFree(d_out));
-        free(h_in); free(h_out_naive); free(h_out_opt);
+        free(h_in);
         printf("\n");
     }
-
     return 0;
 }
