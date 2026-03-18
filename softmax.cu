@@ -1,22 +1,22 @@
 #include<cuda_runtime.h>
 #include "public.h"
 
-__device__ float warpReduceMax(float val){
+__device__ __forceinline__ float warpReduceMax(float val){
     for(int offset = 16; offset > 0; offset /= 2){
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+        val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, offset));
     }
     return val;
 }
 
-__device__ float warpReduceSum(float val){
+__device__ __forceinline__ float warpReduceSum(float val){
     for(int offset = 16; offset > 0; offset /= 2){
-        val += __shfl_down_sync(0xffffffff, val, offset);
+        val += __shfl_xor_sync(0xffffffff, val, offset);
     }
     return val;
 }
 
-template<int N, int C>
-__global__ void softmax_forward(const float* input, float* output){
+template<int C>
+__global__ void softmax_forward_naive(const float* input, float* output){
     // 计算线程信息，申明空间。
     const int row = blockIdx.x;
     const int thread_id = threadIdx.x;
@@ -81,3 +81,19 @@ __global__ void softmax_forward(const float* input, float* output){
     }
 }
 
+// 优化：
+//  1. 一个block负责计算4个rows。
+//  2. 引入float4向量化读取。
+//  3. 优化全局访存读取。
+template<int C, int rows_per_block>
+__global__ void softmax_forward_optimize(const float* input, float* output){
+    // 计算线程信息，申明空间。
+    // 一个block有4个wrap，每个wrap负责计算一个row。
+    const int row = blockIdx.x;
+    const int thread_id = threadIdx.x;
+    const int wrap_id = thread_id / WARP_SIZE;
+    const int lane_id = thread_id % WARP_SIZE;
+    input += row * C;
+
+
+}
