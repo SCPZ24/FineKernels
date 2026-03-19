@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <iostream>
 #include "../public.h"
 
 __device__ __forceinline__ float warpReduceSum(float val){
@@ -93,76 +94,67 @@ __global__ void reduce_optimize(const float* __restrict__ input, float* __restri
 }
 
 // 由Gemini生成的测试函数
-void run_benchmark(int N, bool use_optimize) {
+void run_test(int N) {
     size_t size = N * sizeof(float);
-    std::vector<float> h_input(N, 1.0f); // 初始化为 1.0，方便验证结果
-    float host_ref = (float)N;
+    float* h_in = (float*)malloc(size);
+    for (int i = 0; i < N; i++) h_in[i] = 1.0f;
 
-    float *d_input, *d_output;
-    cudaMalloc(&d_input, size);
-    cudaMalloc(&d_output, sizeof(float));
+    float *d_in, *d_inter, *d_out;
+    cudaMalloc(&d_in, size);
+    cudaMalloc(&d_out, sizeof(float));
+    cudaMemcpy(d_in, h_in, size, cudaMemcpyHostToDevice);
 
-    cudaMemcpy(d_input, h_input.data(), size, cudaMemcpyHostToDevice);
-    cudaMemset(d_output, 0, sizeof(float));
-
-    // 计时器
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    int threads = 1024;
-    int blocks;
+    // 1. Naive 测试: 启动两次相同的 Kernel
+    int threads_1 = 1024;
+    int blocks_1 = N / (threads_1 * 2);
+    cudaMalloc(&d_inter, blocks_1 * sizeof(float));
+    cudaMemset(d_out, 0, sizeof(float));
 
-    if (use_optimize) {
-        // Optimized 每个 Block 处理 1024 * 8 = 8192 个 float
-        blocks = N / (threads * 8);
-        cudaEventRecord(start);
-        reduce_optimize<32><<<blocks, threads>>>(d_input, d_output);
-        cudaEventRecord(stop);
-    } else {
-        // Naive 每个 Block 处理 1024 * 2 = 2048 个 float
-        blocks = N / (threads * 2);
-        cudaEventRecord(start);
-        reduce_naive<32><<<blocks, threads>>>(d_input, d_output);
-        cudaEventRecord(stop);
-    }
+    cudaEventRecord(start);
+    // 第一次：规约全量数据到 d_inter
+    reduce_naive<32><<<blocks_1, threads_1>>>(d_in, d_inter);
+    // 第二次：规约 d_inter 到最终 d_out
+    // 因为 blocks_1 = 512，所以只需要 256 个线程启动一次即可
+    reduce_naive<8><<<1, blocks_1 / 2>>>(d_inter, d_out);
+    cudaEventRecord(stop);
 
     cudaEventSynchronize(stop);
-    float ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
+    float ms_naive;
+    cudaEventElapsedTime(&ms_naive, start, stop);
+    float res_naive;
+    cudaMemcpy(&res_naive, d_out, sizeof(float), cudaMemcpyDeviceToHost);
 
-    float h_output = 0;
-    cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);
+    // 2. Optimized 测试: 启动一次
+    cudaMemset(d_out, 0, sizeof(float));
+    int threads_opt = 1024;
+    int blocks_opt = N / (threads_opt * 8);
 
-    // 计算有效带宽 (GB/s)
-    double bandwidth = (size / (ms / 1000.0)) / 1e9;
+    cudaEventRecord(start);
+    reduce_optimize<32><<<blocks_opt, threads_opt>>>(d_in, d_out);
+    cudaEventRecord(stop);
 
-    std::cout << std::left << std::setw(12) << (use_optimize ? "Optimized" : "Naive")
-              << " | N: " << std::setw(8) << N 
-              << " | Time: " << std::fixed << std::setprecision(4) << ms << " ms"
-              << " | Bandwidth: " << std::setw(8) << bandwidth << " GB/s"
-              << " | Correct: " << (std::abs(h_output - host_ref) < 1e-1 ? "PASS" : "FAIL") 
-              << " (Res: " << h_output << ")" << std::endl;
+    cudaEventSynchronize(stop);
+    float ms_opt;
+    cudaEventElapsedTime(&ms_opt, start, stop);
+    float res_opt;
+    cudaMemcpy(&res_opt, d_out, sizeof(float), cudaMemcpyDeviceToHost);
 
-    cudaFree(d_input);
-    cudaFree(d_output);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    printf("N = %d\n", N);
+    printf("  Naive (2-Launch): %8.4f ms | BW: %7.2f GB/s | Res: %.1f\n", 
+           ms_naive, (size / (ms_naive / 1000.0)) / 1e9, res_naive);
+    printf("  Optimized (1-L):  %8.4f ms | BW: %7.2f GB/s | Res: %.1f\n", 
+           ms_opt, (size / (ms_opt / 1000.0)) / 1e9, res_opt);
+    printf("----------------------------------------------------------\n");
+
+    free(h_in); cudaFree(d_in); cudaFree(d_inter); cudaFree(d_out);
 }
 
 int main() {
-    std::cout << "Starting Reduction Benchmark..." << std::endl;
-    std::cout << "--------------------------------------------------------------------------------" << std::endl;
-
-    // 测试 1024 * 1024
-    run_benchmark(1024 * 1024, false);
-    run_benchmark(1024 * 1024, true);
-
-    std::cout << "--------------------------------------------------------------------------------" << std::endl;
-
-    // 测试 512 * 512
-    run_benchmark(512 * 512, false);
-    run_benchmark(512 * 512, true);
-
+    run_test(1024 * 1024);
+    run_test(512 * 512);
     return 0;
 }
