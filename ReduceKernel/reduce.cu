@@ -9,6 +9,14 @@ __device__ __forceinline__ float warpReduceSum(float val){
     return val;
 }
 
+__device__ __forceinline__ float4 operator+(const float4& a, const float4& b){
+    return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+
+__device__ __forceinline__ float reduceFloat4(const float4& f4){
+    return f4.x + f4.y + f4.z + f4.w;
+}
+
 template<int num_wraps>
 __global__ void reduce_naive(const float* __restrict__ input, float* __restrict__ output){
     // 外部启动：C = blockDim.x
@@ -47,56 +55,114 @@ __global__ void reduce_naive(const float* __restrict__ input, float* __restrict_
     }
 }
 
+template<int num_wraps = 32>
+__global__ void reduce_optimize(const float* __restrict__ input, float* __restrict__ output){
+    // 现在，output不是数组而是单个float的指针。
+    // 默认，一个block还是有1024thread，每个thread处理2个float4。
+    const int thread_id = threadIdx.x;
+    const int wrap_id = thread_id / WARP_SIZE;
+    const float4 *input_f4 = reinterpret_cast<const float4*>(input);
+    __shared__ float shared_data[num_wraps];
+
+    float local_val = 0.0f;
+    {
+        const int begin_idx = blockIdx.x * blockDim.x * 2;
+        const float4 local_val_f4 = input_f4[begin_idx + thread_id] + input_f4[begin_idx + blockDim.x + thread_id];
+        local_val = reduceFloat4(local_val_f4);
+    }
+
+    local_val += __shfl_down_sync(FULL_MASK, local_val, 16);
+    local_val += __shfl_down_sync(FULL_MASK, local_val, 8);
+    local_val += __shfl_down_sync(FULL_MASK, local_val, 4);
+    local_val += __shfl_down_sync(FULL_MASK, local_val, 2);
+    local_val += __shfl_down_sync(FULL_MASK, local_val, 1);
+
+    if(thread_id % WARP_SIZE == 0){
+        shared_data[wrap_id] = local_val;
+    }
+    __syncthreads();
+
+    if(wrap_id == 0){
+        local_val = (thread_id < num_wraps) ? shared_data[thread_id] : 0.0f;
+        local_val = warpReduceSum(local_val);
+    }
+
+    if(thread_id == 0){
+        atomicAdd(output, local_val);
+    }
+}
+
 // 由Gemini生成的测试函数
-void run_test(int N, int threads_per_block) {
+void run_benchmark(int N, bool use_optimize) {
     size_t size = N * sizeof(float);
-    std::vector<float> h_input(N);
-    for (int i = 0; i < N; ++i) h_input[i] = 1.0f; // 测试用例：全 1，结果应等于 N
+    std::vector<float> h_input(N, 1.0f); // 初始化为 1.0，方便验证结果
+    float host_ref = (float)N;
 
-    float *d_input, *d_inter, *d_output;
-    int blocks = N / (threads_per_block * 2);
-
+    float *d_input, *d_output;
     cudaMalloc(&d_input, size);
-    cudaMalloc(&d_inter, blocks * sizeof(float));
     cudaMalloc(&d_output, sizeof(float));
 
     cudaMemcpy(d_input, h_input.data(), size, cudaMemcpyHostToDevice);
+    cudaMemset(d_output, 0, sizeof(float));
 
-    // 第一轮归约
-    if (threads_per_block == 1024) 
-        reduce_naive<32><<<blocks, 1024>>>(d_input, d_inter);
-    else if (threads_per_block == 512)
-        reduce_naive<16><<<blocks, 512>>>(d_input, d_inter);
+    // 计时器
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-    // 第二轮归约：将中间结果 blocks 个元素规约为 1 个
-    // 注意：这里为了简化，假设 blocks <= 1024，且满足你的 kernel 逻辑（输入量是线程数2倍）
-    // 如果 blocks 很大，这里需要根据 blocks 数量调整启动配置
-    if (blocks > 0) {
-        int final_threads = 512; // 选一个固定值
-        // 调整输入以符合你的“一读二”逻辑：input 长度应为 final_threads * 2
-        // 在实际工业代码中，这里通常会写一个更通用的边界检查 kernel
-        reduce_naive<16><<<1, final_threads>>>(d_inter, d_output);
+    int threads = 1024;
+    int blocks;
+
+    if (use_optimize) {
+        // Optimized 每个 Block 处理 1024 * 8 = 8192 个 float
+        blocks = N / (threads * 8);
+        cudaEventRecord(start);
+        reduce_optimize<32><<<blocks, threads>>>(d_input, d_output);
+        cudaEventRecord(stop);
+    } else {
+        // Naive 每个 Block 处理 1024 * 2 = 2048 个 float
+        blocks = N / (threads * 2);
+        cudaEventRecord(start);
+        reduce_naive<32><<<blocks, threads>>>(d_input, d_output);
+        cudaEventRecord(stop);
     }
+
+    cudaEventSynchronize(stop);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
 
     float h_output = 0;
     cudaMemcpy(&h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);
 
-    std::cout << "Config: N=" << N << ", BlockSize=" << threads_per_block 
-              << " | Result: " << h_output << " (Expected: " << (float)N << ")" << std::endl;
+    // 计算有效带宽 (GB/s)
+    double bandwidth = (size / (ms / 1000.0)) / 1e9;
 
-    cudaFree(d_input); cudaFree(d_inter); cudaFree(d_output);
+    std::cout << std::left << std::setw(12) << (use_optimize ? "Optimized" : "Naive")
+              << " | N: " << std::setw(8) << N 
+              << " | Time: " << std::fixed << std::setprecision(4) << ms << " ms"
+              << " | Bandwidth: " << std::setw(8) << bandwidth << " GB/s"
+              << " | Correct: " << (std::abs(h_output - host_ref) < 1e-1 ? "PASS" : "FAIL") 
+              << " (Res: " << h_output << ")" << std::endl;
+
+    cudaFree(d_input);
+    cudaFree(d_output);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 }
 
-void test_naive() {
-    std::cout << "--- Starting Reduction Tests ---" << std::endl;
-    
-    // 测试 1024*1024 (1,048,576 元素)
-    // 你的配置：每个线程读2个，BlockSize=1024，则一个Block处理2048个
-    // 需要 1024*1024 / 2048 = 512 Blocks
-    run_test(1024 * 1024, 1024);
+int main() {
+    std::cout << "Starting Reduction Benchmark..." << std::endl;
+    std::cout << "--------------------------------------------------------------------------------" << std::endl;
 
-    // 测试 2048*512 (1,048,576 元素)
-    // 你的配置：每个线程读2个，BlockSize=512，则一个Block处理1024个
-    // 需要 1024*1024 / 1024 = 1024 Blocks
-    run_test(2048 * 512, 512);
+    // 测试 1024 * 1024
+    run_benchmark(1024 * 1024, false);
+    run_benchmark(1024 * 1024, true);
+
+    std::cout << "--------------------------------------------------------------------------------" << std::endl;
+
+    // 测试 512 * 512
+    run_benchmark(512 * 512, false);
+    run_benchmark(512 * 512, true);
+
+    return 0;
 }
