@@ -18,19 +18,22 @@ __global__ void histogram_kernel(const uint8_t* __restrict__ input, int* __restr
     // 5. 将局部直方图原子加回到全局内存 hist
 
     const uint32_t* input_u32 = reinterpret_cast<const uint32_t*>(input);
-    const uint32_t local_value = input_u32[blockIdx.x * blockDim.x + threadIdx.x];
+    const int thread_task_stride = blockDim.x * gridDim.x;
     __shared__ int shared_hist[BINS];
+    n >>= 2;
 
     for(int i = threadIdx.x; i < BINS; i += blockDim.x) {
         shared_hist[i] = 0;
     }
     __syncthreads();
-    
-    atomicAdd(&shared_hist[local_value & 0xFF000000], 1);
-    atomicAdd(&shared_hist[local_value & 0x00FF0000 >> 8], 1);
-    atomicAdd(&shared_hist[local_value & 0x0000FF00 >> 16], 1);
-    atomicAdd(&shared_hist[local_value & 0x000000FF >> 24], 1);
-    
+
+    for(int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += thread_task_stride){
+        const uint32_t local_value = input_u32[i];
+        atomicAdd(&shared_hist[local_value>>24 & 0x000000FF], 1);
+        atomicAdd(&shared_hist[local_value>>16 & 0x000000FF], 1);
+        atomicAdd(&shared_hist[local_value>>8 & 0x000000FF], 1);
+        atomicAdd(&shared_hist[local_value>>0 & 0x000000FF], 1);
+    }
     __syncthreads();
     
     // 虽然此处 BLOCK_SIZE = 256， BINS = 256， 但是我们还是考虑BINS大于BLOCK_SIZE的情况，用for。
