@@ -17,8 +17,26 @@ __global__ void histogram_kernel(const uint8_t* __restrict__ input, int* __restr
     // 4. __syncthreads() 同步
     // 5. 将局部直方图原子加回到全局内存 hist
 
-    input += blockIdx.x * blockDim.x;
+    const uint32_t* input_u32 = reinterpret_cast<const uint32_t*>(input);
+    const uint32_t local_value = input_u32[blockIdx.x * blockDim.x + threadIdx.x];
+    __shared__ int shared_hist[BINS];
+
+    for(int i = threadIdx.x; i < BINS; i += blockDim.x) {
+        shared_hist[i] = 0;
+    }
+    __syncthreads();
     
+    atomicAdd(&shared_hist[local_value & 0xFF000000], 1);
+    atomicAdd(&shared_hist[local_value & 0x00FF0000 >> 8], 1);
+    atomicAdd(&shared_hist[local_value & 0x0000FF00 >> 16], 1);
+    atomicAdd(&shared_hist[local_value & 0x000000FF >> 24], 1);
+    
+    __syncthreads();
+    
+    // 虽然此处 BLOCK_SIZE = 256， BINS = 256， 但是我们还是考虑BINS大于BLOCK_SIZE的情况，用for。
+    for(int i = threadIdx.x; i < BINS; i += blockDim.x) {
+        atomicAdd(&hist[i], shared_hist[i]);
+    }
 }
 
 // CPU 参考实现用于校验
@@ -52,7 +70,7 @@ int main() {
     cudaMemset(d_hist, 0, hist_size);
 
     // 定义执行配置
-    int gridSize = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int gridSize = (n + BLOCK_SIZE - 1) / BLOCK_SIZE >> 2;
     
     // 计时开始
     cudaEvent_t start, stop;
