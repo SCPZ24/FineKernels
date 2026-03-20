@@ -11,29 +11,26 @@
 // 功能为统计频数分布直方图
 // ==========================================================
 __global__ void histogram_kernel(const uint8_t* __restrict__ input, int* __restrict__ hist, int n) {
-    // 1. 声明共享内存 (256个 bin)
-    // 2. 初始化共享内存为 0
-    // 3. 线程跨步读取全局内存，原子更新共享内存中的局部直方图
-    // 4. __syncthreads() 同步
-    // 5. 将局部直方图原子加回到全局内存 hist
-
-    const uint32_t* input_u32 = reinterpret_cast<const uint32_t*>(input);
-    const uint32_t local_value = input_u32[blockIdx.x * blockDim.x + threadIdx.x];
     __shared__ int shared_hist[BINS];
-
+    
+    // 初始化共享内存
     for(int i = threadIdx.x; i < BINS; i += blockDim.x) {
         shared_hist[i] = 0;
     }
     __syncthreads();
     
-    atomicAdd(&shared_hist[local_value & 0xFF000000], 1);
-    atomicAdd(&shared_hist[local_value & 0x00FF0000 >> 8], 1);
-    atomicAdd(&shared_hist[local_value & 0x0000FF00 >> 16], 1);
-    atomicAdd(&shared_hist[local_value & 0x000000FF >> 24], 1);
+    // 每个线程处理多个元素
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    
+    for(int i = tid; i < n; i += stride) {
+        uint8_t value = input[i];
+        atomicAdd(&shared_hist[value], 1);
+    }
     
     __syncthreads();
     
-    // 虽然此处 BLOCK_SIZE = 256， BINS = 256， 但是我们还是考虑BINS大于BLOCK_SIZE的情况，用for。
+    // 将局部直方图合并到全局直方图
     for(int i = threadIdx.x; i < BINS; i += blockDim.x) {
         atomicAdd(&hist[i], shared_hist[i]);
     }
@@ -70,7 +67,7 @@ int main() {
     cudaMemset(d_hist, 0, hist_size);
 
     // 定义执行配置
-    int gridSize = (n + BLOCK_SIZE - 1) / BLOCK_SIZE >> 2;
+    int gridSize = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     
     // 计时开始
     cudaEvent_t start, stop;
