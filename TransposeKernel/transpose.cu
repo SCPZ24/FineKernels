@@ -1,6 +1,11 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <iostream>
+#include <vector>
+#include <iomanip>
+
+#define SM_VAL 16
+#define SN_VAL 32
 
 __global__ void transpose_naive(const float* input, float* output, int M, int N){
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -118,8 +123,8 @@ void checkResult(float *out, float *ref, int size) {
 
 int main() {
     // 矩阵尺寸 (确保是 Tile 的倍数以便测试，工业级代码需处理边界)
-    const int M = 4096;
-    const int N = 4096;
+    const int M = 8192;
+    const int N = 8192;
     const int size = M * N;
     size_t bytes = size * sizeof(float);
 
