@@ -73,29 +73,33 @@ __global__ void transpose_shared_bank_conflict_free_double_fetch(const float* in
 
     __shared__ float cache[SM * (SN+1)];
     constexpr int cache_row_size = SN + 1;
-    int global_x = (blockIdx.x * blockDim.x << 1) + threadIdx.x;
-    int global_y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int global_x = (blockIdx.x * blockDim.x << 1) + threadIdx.x;
+    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
 
     const int input_offset = global_y * N + global_x;
 
     int shared_offset_row, shared_offset_col;
     {
-        const int block_linear_index = (blockDim.x * threadIdx.y) + threadIdx.x;
+        const int block_linear_index = blockDim.x * threadIdx.y + threadIdx.x;
         shared_offset_row = block_linear_index / blockDim.y;
         shared_offset_col = block_linear_index % blockDim.y;
     }
 
-    global_x = blockDim.y * blockIdx.y + shared_offset_col;
-    global_y = (blockDim.x * blockIdx.x << 1) + shared_offset_row;
+    const int global_x_target = blockDim.y * blockIdx.y + shared_offset_col;
+    const int global_y_target = (blockDim.x * blockIdx.x << 1) + shared_offset_row;
 
     if(global_x < M && global_y < N){
         {
             const int cache_offset = threadIdx.y * cache_row_size + threadIdx.x;
             cache[cache_offset] = input[input_offset];
-            cache[cache_offset + blockDim.x] = input[input_offset + 1];
+            cache[cache_offset + blockDim.x] = input[input_offset + blockDim.x];
         }
+
         __syncthreads();
-        output[global_y * M + global_x] = cache[shared_offset_col * cache_row_size + shared_offset_row];
-        output[(global_y + blockDim.x) * M + global_x] = cache[shared_offset_col * cache_row_size + shared_offset_row + blockDim.x];
+        {
+            const int cache_offset = shared_offset_col * cache_row_size + shared_offset_row;
+            output[global_y_target * M + global_x_target] = cache[cache_offset];
+            output[(global_y_target + blockDim.x) * M + global_x_target] = cache[cache_offset + blockDim.x];
+        }
     }
 }
