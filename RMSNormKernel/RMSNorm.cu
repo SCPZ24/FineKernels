@@ -87,7 +87,7 @@ __global__ void RMSNorm_grid_collapse(const float* input, const float* gamma, fl
     // gamma: (C,)
 
     const int thread_id = threadIdx.x;
-    const int threads_per_row = blockDim.x >> 4; // 假设每行 256 线程
+    const int threads_per_row = blockDim.x >> 2;
     const int row_id = thread_id / threads_per_row;
     const int row_thread_id = thread_id % threads_per_row;
     constexpr int wraps_per_row = C >> 7;
@@ -165,7 +165,8 @@ bool check_result(const float* gpu, const float* cpu, int len) {
     return max_err < 1e-5;
 }
 
-void run_test(const int N, const int C) {
+template<int N, int C>
+void run_test() {
     float eps = 1e-5f;
     size_t size = N * C * sizeof(float);
     size_t g_size = C * sizeof(float);
@@ -210,7 +211,7 @@ void run_test(const int N, const int C) {
     cudaMemset(d_out, 0, size);
     cudaEventRecord(start);
     // 配置：1 个 Block 处理 4 行，线程数固定为 1024
-    RMSNorm_grid_collapse<N, C><<<N / 4, C>>>(d_in, d_gamma, d_out, eps);
+    RMSNorm_grid_collapse<N, C><<<N/4, C>>>(d_in, d_gamma, d_out, eps);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaMemcpy(h_out_gpu.data(), d_out, size, cudaMemcpyDeviceToHost);
@@ -228,10 +229,10 @@ int main() {
     srand(2026);
     
     // 测试 Case 1: 小规模（受限于启动开销）
-    run_test(8, 4096);
+    run_test<8, 4096>();
 
     // 测试 Case 2: 大规模（测试带宽极限）
-    run_test(1024, 4096);
+    run_test<1024, 4096>();
 
     return 0;
 }
