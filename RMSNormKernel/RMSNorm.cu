@@ -90,8 +90,7 @@ __global__ void RMSNorm_grid_collapse(const float* input, const float* gamma, fl
     const int threads_per_row = blockDim.x >> 2;
     const int row_id = thread_id / threads_per_row;
     const int row_thread_id = thread_id % threads_per_row;
-    constexpr int wraps_per_row = C >> 7;
-    __shared__ float shared_wrap_data[4][wraps_per_row]; 
+    __shared__ float shared_wrap_data[4][9]; 
     
     const float4* input_f4;
     const float4* gamma_f4 = reinterpret_cast<const float4*>(gamma);
@@ -110,8 +109,8 @@ __global__ void RMSNorm_grid_collapse(const float* input, const float* gamma, fl
 
     local_sum = warpReduceSum(local_sum);
     
-    const int row_warp_id = row_thread_id / WARP_SIZE;
-    const int lane_id = thread_id % WARP_SIZE;
+    const int row_warp_id = row_thread_id >> 5;
+    const int lane_id = thread_id & 31;
     
     if(lane_id == 0){
         shared_wrap_data[row_id][row_warp_id] = local_sum;
@@ -119,10 +118,8 @@ __global__ void RMSNorm_grid_collapse(const float* input, const float* gamma, fl
     __syncthreads();
     
     if (row_warp_id == 0) {
-        local_sum = 0;
-        for(int i = lane_id; i < wraps_per_row; i += WARP_SIZE){
-            local_sum += shared_wrap_data[row_id][i];
-        }
+        const int warps_per_row = threads_per_row >> 5;
+        local_sum = (lane_id < warps_per_row) ? shared_wrap_data[row_id][lane_id] : 0.f;
         local_sum = warpReduceSum(local_sum);
         if (lane_id == 0){
             shared_wrap_data[row_id][0] = rsqrt(local_sum / C + eps);
@@ -211,7 +208,11 @@ void run_test() {
     cudaMemset(d_out, 0, size);
     cudaEventRecord(start);
     // 配置：1 个 Block 处理 4 行，线程数固定为 1024
-    RMSNorm_grid_collapse<N, C><<<N/4, C>>>(d_in, d_gamma, d_out, eps);
+    if(C > 1024){
+        RMSNorm_grid_collapse<N, C><<<N/4, 1024>>>(d_in, d_gamma, d_out, eps);
+    }else{
+        RMSNorm_grid_collapse<N, C><<<N/4, C>>>(d_in, d_gamma, d_out, eps);
+    }
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaMemcpy(h_out_gpu.data(), d_out, size, cudaMemcpyDeviceToHost);
