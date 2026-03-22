@@ -114,7 +114,7 @@ __global__ void RMSNorm_grid_collapse(const float* input, const float* gamma, fl
     const int lane_id = thread_id % WARP_SIZE;
     
     if(lane_id == 0){
-        shared_wrap_data[row_id][row_warp_id] = local_sum
+        shared_wrap_data[row_id][row_warp_id] = local_sum;
     }
     __syncthreads();
     
