@@ -165,7 +165,7 @@ bool check_result(const float* gpu, const float* cpu, int len) {
     return max_err < 1e-5;
 }
 
-void run_test(int N, int C) {
+void run_test(const int N, const int C) {
     float eps = 1e-5f;
     size_t size = N * C * sizeof(float);
     size_t g_size = C * sizeof(float);
@@ -198,7 +198,7 @@ void run_test(int N, int C) {
     // --- 测试 Kernel 1: Block Collapse ---
     cudaEventRecord(start);
     // 配置：1 个 Block 处理 1 行，每个 Block 256 线程执行跨步循环
-    RMSNorm_block_collapse<0, 4096><<<N, 256, 256 * sizeof(float)>>>(d_in, d_gamma, d_out, eps);
+    RMSNorm_block_collapse<N, C><<<N, C/4>>>(d_in, d_gamma, d_out, eps);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaMemcpy(h_out_gpu.data(), d_out, size, cudaMemcpyDeviceToHost);
@@ -210,7 +210,7 @@ void run_test(int N, int C) {
     cudaMemset(d_out, 0, size);
     cudaEventRecord(start);
     // 配置：1 个 Block 处理 4 行，线程数固定为 1024
-    RMSNorm_grid_collapse<0, 4096><<<N / 4, 1024>>>(d_in, d_gamma, d_out, eps);
+    RMSNorm_grid_collapse<N, C><<<N / 4, C>>>(d_in, d_gamma, d_out, eps);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     cudaMemcpy(h_out_gpu.data(), d_out, size, cudaMemcpyDeviceToHost);
