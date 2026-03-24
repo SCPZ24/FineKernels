@@ -69,3 +69,71 @@ __global__ void prefix_sum_double_buffer(const float* __restrict__ input, float*
         output[thread_id] = ptr_dst[thread_id];
     }
 }
+
+template<int N>
+__global__ void prefix_sum_tree(const float* __restrict__ input, float* __restrict__ output){
+    const int thread_id = threadIdx.x;
+    __shared__ float shared_input[N];
+   
+    if(thread_id < N){
+        shared_input[thread_id] = input[thread_id];
+    }
+    __syncthreads();
+
+    // Sweep Up
+    for(int s = 1; s < N; s <<= 1){
+        __syncthreads();
+        const int root = ((thread_id + 1) * s << 1) - 1;
+        if(root < N){
+            shared_input[root] += shared_input[root - s];
+        }
+    }
+
+    // Sweep Down
+    for(int s = N >> 1; s; s >>= 1){
+        __syncthreads();
+        const int child = (s * 3 - 1) + (thread_id * s << 1);
+        if(child < N){
+            shared_input[child] += shared_input[child - s];
+        }
+    }
+
+    if(thread_id < N){
+        output[thread_id] = shared_input[thread_id];
+    }
+}
+
+#define offset(N) (N + (N >> 5))
+
+template<int N>
+__global__ void prefix_sum_tree_bank_conflict_free(const float* __restrict__ input, float* __restrict__ output){
+    const int thread_id = threadIdx.x;
+    __shared__ float shared_input[offset(N)];
+   
+    if(thread_id < N){
+        shared_input[offset(thread_id)] = input[thread_id];
+    }
+    __syncthreads();
+
+    // Sweep Up
+    for(int s = 1; s < N; s <<= 1){
+        __syncthreads();
+        const int root = ((thread_id + 1) * s << 1) - 1;
+        if(root < N){
+            shared_input[offset(root)] += shared_input[offset(root - s)];
+        }
+    }
+
+    // Sweep Down
+    for(int s = N >> 1; s; s >>= 1){
+        __syncthreads();
+        const int child = (s * 3 - 1) + (thread_id * s << 1);
+        if(child < N){
+            shared_input[offset(child)] += shared_input[offset(child - s)];
+        }
+    }
+
+    if(thread_id < N){
+        output[thread_id] = shared_input[offset(thread_id)];
+    }
+}
