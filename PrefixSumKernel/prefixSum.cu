@@ -4,6 +4,7 @@
 #include <vector>
 #include <numeric>
 #include <cmath>
+#include <functional>
 #include "../public.h"
 
 template<int N>
@@ -22,8 +23,9 @@ __global__ void prefix_sum_naive(const float* __restrict__ input, float* __restr
         // 第二次sync以前，最好都是做写入。
         for(int s = 1; s < N; s <<= 1){
             const bool in_operation = thread_id >= s;
+            float temp;
             if(in_operation){
-                const float temp = shared_input[thread_id - s] + shared_input[thread_id];
+                temp = shared_input[thread_id - s] + shared_input[thread_id];
             }
             __syncthreads();
             if(in_operation){
@@ -38,7 +40,7 @@ __global__ void prefix_sum_naive(const float* __restrict__ input, float* __restr
     }
 }
 
-__device__ __forceinline__ float warp_scan(float local_value){
+__device__ __forceinline__ float warp_scan(float local_value, const int thread_id){
     float tmp;
     tmp = __shfl_up_sync(FULL_MASK, local_value, 1);
     if((thread_id & 31) >= 1){
@@ -75,7 +77,7 @@ __global__ void prefix_sum_wrap(const float* __restrict__ input, float* __restri
     }
     __syncthreads();
 
-    local_value = warp_scan(local_value);
+    local_value = warp_scan(local_value, thread_id);
     if((thread_id & 31) == 31){
         shared_value[thread_id >> 5] = local_value;
     }
@@ -84,7 +86,7 @@ __global__ void prefix_sum_wrap(const float* __restrict__ input, float* __restri
     if(wrap_id == 0){
         const float temp = local_value;
         local_value = shared_value[thread_id];
-        local_value = warp_scan(local_value);
+        local_value = warp_scan(local_value, thread_id);
         shared_value[thread_id] = local_value;
         local_value = temp;
     }
@@ -132,7 +134,7 @@ __global__ void prefix_sum_double_buffer(const float* __restrict__ input, float*
     }
 
     if(thread_id < N){
-        output[thread_id] = ptr_dst[thread_id];
+        output[thread_id] = ptr_src[thread_id];
     }
 }
 
@@ -163,6 +165,7 @@ __global__ void prefix_sum_tree(const float* __restrict__ input, float* __restri
             shared_input[child] += shared_input[child - s];
         }
     }
+    __syncthreads();
 
     if(thread_id < N){
         output[thread_id] = shared_input[thread_id];
@@ -198,6 +201,7 @@ __global__ void prefix_sum_tree_bank_conflict_free(const float* __restrict__ inp
             shared_input[offset(child)] += shared_input[offset(child - s)];
         }
     }
+    __syncthreads();
 
     if(thread_id < N){
         output[thread_id] = shared_input[offset(thread_id)];
@@ -272,7 +276,7 @@ int main() {
     auto run_warp = [&]() { prefix_sum_wrap<N><<<1, N>>>(d_input, d_output); };
 
     // 3. 正确性验证与性能测试
-    struct TestNode { std::string name; decltype(run_naive) func; };
+    struct TestNode { std::string name; std::function<void()> func; };
     std::vector<TestNode> tests = {
         {"Naive Scan (Double Sync)", run_naive},
         {"Double Buffer Scan", run_double},

@@ -53,3 +53,19 @@
 | N=8, C=4096  | Grid Collapse  | 0.0227 ms |
 | N=1024, C=4096 | Block Collapse | 0.1055 ms |
 | N=1024, C=4096 | Grid Collapse  | 0.0655 ms |
+
+## PrefixSum Kernel
+
+实现思路: [前缀和](PrefixSumKernel/实现思路.md)
+
+### 测试性能
+
+| 实现方案                   | 执行时间(ms)|
+| ------------------------ | -------- |
+| Naive Scan (Double Sync) | 0.00336  |
+| Double Buffer Scan       | 0.00298  |
+| Brent-Kung Tree          | 0.00359  |
+| Brent-Kung (BC-Free)     | 0.00349  |
+| Warp Shuffle Hierarchical| 0.00304  |
+尝试了若干种优化，居然都不如基础实现。唐完了。
+可能是只有一个block导致的。
