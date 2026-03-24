@@ -1,6 +1,9 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <iostream>
+#include <vector>
+#include <numeric>
+#include <cmath>
 #include "../public.h"
 
 template<int N>
@@ -199,4 +202,103 @@ __global__ void prefix_sum_tree_bank_conflict_free(const float* __restrict__ inp
     if(thread_id < N){
         output[thread_id] = shared_input[offset(thread_id)];
     }
+}
+
+//------------------由Gemini创建的测试用例------------------
+// 验证函数
+bool verify(const float* cpu_res, const float* gpu_res, int n) {
+    for (int i = 0; i < n; i++) {
+        if (std::abs(cpu_res[i] - gpu_res[i]) > 1e-3) {
+            printf("Error at index %d: CPU=%f, GPU=%f\n", i, cpu_res[i], gpu_res[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+// 计时辅助函数
+template<typename Func>
+float benchmark(Func kernel_func, int n, int iterations = 100) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // 预热
+    kernel_func();
+
+    cudaEventRecord(start);
+    for (int i = 0; i < iterations; i++) {
+        kernel_func();
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    return milliseconds / iterations;
+}
+
+int main() {
+    const int N = 1024;
+    const size_t size = N * sizeof(float);
+
+    // 1. 数据准备
+    std::vector<float> h_input(N);
+    std::vector<float> h_output_cpu(N);
+    std::vector<float> h_output_gpu(N);
+    
+    for (int i = 0; i < N; i++) h_input[i] = 1.0f; // 简单测试：全1数组前缀和应为 1, 2, 3...
+
+    // CPU 计算参考结果
+    float sum = 0;
+    for (int i = 0; i < N; i++) {
+        sum += h_input[i];
+        h_output_cpu[i] = sum;
+    }
+
+    float *d_input, *d_output;
+    cudaMalloc(&d_input, size);
+    cudaMalloc(&d_output, size);
+    cudaMemcpy(d_input, h_input.data(), size, cudaMemcpyHostToDevice);
+
+    // 2. 定义测试套件
+    auto run_naive = [&]() { prefix_sum_naive<N><<<1, N>>>(d_input, d_output); };
+    auto run_double = [&]() { prefix_sum_double_buffer<N><<<1, N>>>(d_input, d_output); };
+    auto run_tree = [&]() { prefix_sum_tree<N><<<1, N>>>(d_input, d_output); };
+    auto run_tree_bc_free = [&]() { prefix_sum_tree_bank_conflict_free<N><<<1, N>>>(d_input, d_output); };
+    auto run_warp = [&]() { prefix_sum_wrap<N><<<1, N>>>(d_input, d_output); };
+
+    // 3. 正确性验证与性能测试
+    struct TestNode { std::string name; decltype(run_naive) func; };
+    std::vector<TestNode> tests = {
+        {"Naive Scan (Double Sync)", run_naive},
+        {"Double Buffer Scan", run_double},
+        {"Brent-Kung Tree", run_tree},
+        {"Brent-Kung (BC-Free)", run_tree_bc_free},
+        {"Warp Shuffle Hierarchical", run_warp}
+    };
+
+    printf("%-30s | %-12s | %-10s\n", "Kernel Name", "Avg Time(ms)", "Status");
+    printf("----------------------------------------------------------------------\n");
+
+    for (auto& test : tests) {
+        // 先跑一次验证正确性
+        test.func();
+        cudaMemcpy(h_output_gpu.data(), d_output, size, cudaMemcpyDeviceToHost);
+        bool ok = verify(h_output_cpu.data(), h_output_gpu.data(), N);
+
+        // 测速
+        float avg_time = benchmark(test.func, N);
+        
+        printf("%-30s | %-12.5f | %-10s\n", 
+               test.name.c_str(), avg_time, ok ? "PASS" : "FAIL");
+    }
+
+    // 清理
+    cudaFree(d_input);
+    cudaFree(d_output);
+    return 0;
 }
