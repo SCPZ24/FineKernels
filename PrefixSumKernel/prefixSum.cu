@@ -38,23 +38,23 @@ __global__ void prefix_sum_naive(const float* __restrict__ input, float* __restr
 __device__ __forceinline__ float warp_scan(float local_value){
     float tmp;
     tmp = __shfl_up_sync(FULL_MASK, local_value, 1);
-    if(thread_id & 31 >= 1){
+    if((thread_id & 31) >= 1){
         local_value += tmp;
     }
     tmp = __shfl_up_sync(FULL_MASK, local_value, 2);
-    if(thread_id & 31 >= 2){
+    if((thread_id & 31) >= 2){
         local_value += tmp;
     }
     tmp = __shfl_up_sync(FULL_MASK, local_value, 4);
-    if(thread_id & 31 >= 4){
+    if((thread_id & 31) >= 4){
         local_value += tmp;
     }
     tmp = __shfl_up_sync(FULL_MASK, local_value, 8);
-    if(thread_id & 31 >= 8){
+    if((thread_id & 31) >= 8){
         local_value += tmp;
     }
     tmp = __shfl_up_sync(FULL_MASK, local_value, 16);
-    if(thread_id & 31 >= 16){
+    if((thread_id & 31) >= 16){
         local_value += tmp;
     }
     return local_value;
@@ -73,13 +73,13 @@ __global__ void prefix_sum_wrap(const float* __restrict__ input, float* __restri
     __syncthreads();
 
     local_value = warp_scan(local_value);
-    if(thread_id & 31 == 31){
+    if((thread_id & 31) == 31){
         shared_value[thread_id >> 5] = local_value;
     }
     __syncthreads();
 
     if(wrap_id == 0){
-        const int temp = local_value;
+        const float temp = local_value;
         local_value = shared_value[thread_id];
         local_value = warp_scan(local_value);
         shared_value[thread_id] = local_value;
@@ -88,7 +88,7 @@ __global__ void prefix_sum_wrap(const float* __restrict__ input, float* __restri
     __syncthreads();
 
     if(wrap_id){
-        local_bias = shared_value[wrap_id - 1];
+        int local_bias = shared_value[wrap_id - 1];
         local_value += local_bias;
     }
 
